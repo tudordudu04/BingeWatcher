@@ -169,7 +169,7 @@ def fetch_page(url: str) -> dict:
             },
             method="GET",
         )
-        
+
         with urlopen(req) as response:
             return json.load(response)
 
@@ -309,13 +309,21 @@ def update(
     # command = "UPDATE shows SET " + str.join(", ", list(map(lambda key: key + "='" + updates[key] + "'", updates.keys()))) + " WHERE name='" + name + "'"
     # set_clause = str.join(", ", (f"{col} = ?" for col in updates.keys()))
 
-    cursor.execute("SELECT id FROM shows WHERE name = ?", (name,))
-    show_id = cursor.fetchone()[0]
+    cursor.execute("SELECT id, latest_episode FROM shows WHERE name = ?", (name,))
+    aux = cursor.fetchone()
+    if aux is None:
+        raise typer.Exit(f"No show found with name '{name}'.")
+    
+    show_id = aux[0]
+    latest_episode = aux[1]
+    
+    if last_watched == None and status == "watched":
+            updates["last_watched"] = latest_episode 
 
     set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
     command = f"UPDATE shows SET {set_clause} WHERE name = ?"
 
-    params = (updates.values()) + [name]
+    params = list(updates.values()) + [name]
     cursor.execute(command, params)
     conn.commit()
     
@@ -492,7 +500,6 @@ def list_cmd(
             print()
     return
 
-    
 @app.command("listed", help = "List all new_episodes")
 def listed():
     cursor.execute("SELECT * FROM new_episodes")
