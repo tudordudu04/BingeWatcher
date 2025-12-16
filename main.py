@@ -1,6 +1,7 @@
 import sqlite3;
 import typer;
 import json;
+import os
 from typing_extensions import Annotated;
 from typing_extensions import Optional;
 from typer import Argument;
@@ -11,6 +12,7 @@ from urllib.request import urlopen, Request;
 from html.parser import HTMLParser;
 from urllib.error import HTTPError, URLError; #don't need rn
 from datetime import date
+from googleapiclient.discovery import build
 
 app = typer.Typer(
     add_completion=False,
@@ -33,7 +35,7 @@ class Status(str, Enum):
 def init_db():
     schema = """CREATE TABLE IF NOT EXISTS shows(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title_id TEXT NOT NULL,
+    title_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL UNIQUE,
     status TEXT DEFAULT 'watching' NOT NULL
             CHECK (status IN ('plan_to_watch', 'watching', 'watched', 'dropped', 'on_hold')),
@@ -41,7 +43,8 @@ def init_db():
     last_watched INTEGER DEFAULT 0 NOT NULL,
     rating REAL DEFAULT 0 NOT NULL,
     imdb_link TEXT NOT NULL,
-    notify INTEGER DEFAULT 1 NOT NULL
+    notify INTEGER DEFAULT 1 NOT NULL,
+    last_page_token TEXT
     );
                 CREATE TABLE IF NOT EXISTS new_episodes(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,19 +54,18 @@ def init_db():
     plot TEXT,
     rating REAL DEFAULT 0 NOT NULL,
     has_trailer INTEGER DEFAULT 0 NOT NULL,
-    trailer_link TEXT,
+    has_related_video INTEGER DEFAULT 0 NOT NULL,
+    video_link TEXT,
+    video_title TEXT,
     FOREIGN KEY (show_id) REFERENCES shows(id) ON DELETE CASCADE
     );
     """
     cursor.executescript(schema)
 
-
-
 try:
     init_db()
 except sqlite3.Error as e:
     print("Initiation of database error: ", e)
-
 
 def get_title_id(link: str) -> str:
     schema = urlparse(link)
@@ -176,18 +178,32 @@ def fetch_page(url: str) -> dict:
 def get_episodes(title_id: str) -> list[dict]:
     url_base = f"https://api.imdbapi.dev/titles/{title_id}/episodes?pageSize=50"
 
-    data = fetch_page(url_base)
+    cursor.execute("SELECT last_page_token, latest_episode FROM shows WHERE title_id = ?", (title_id,))
+    last_page_token, latest_episode = cursor.fetchone()
+
+    if last_page_token:
+        url = f"{url_base}&pageToken={last_page_token}"
+        episode_number = latest_episode
+    else:
+        episode_number = 0
+        url = url_base
+
+    data = fetch_page(url)
     episodes = list(data.get("episodes", []))
-    page_token = data.get("nextPageToken")
+
+    page_token = last_page_token if last_page_token else data.get("nextPageToken", "")
 
     while page_token:
         next_url = f"{url_base}&pageToken={page_token}"
         data = fetch_page(next_url)
         episodes.extend(data.get("episodes", []))
-        page_token = data.get("nextPageToken")
+        last_page_token = page_token
+        page_token = data.get("nextPageToken", "")
+
+    cursor.execute("UPDATE shows SET last_page_token = ? WHERE title_id = ?", (last_page_token, title_id))
+    conn.commit()
 
     episode_list = []
-    episode_number = 0
 
     for episode in episodes:
         if "releaseDate" not in episode:
@@ -204,7 +220,7 @@ def get_episodes(title_id: str) -> list[dict]:
 
         if "episodeNumber" not in episode:
             continue
-
+        
         episode_number += 1
         title = episode.get("title", f"Episode {episode_number}")
         plot = episode.get("plot", "")
@@ -214,14 +230,14 @@ def get_episodes(title_id: str) -> list[dict]:
 
     return episode_list
 
-def get_new_episodes(episode_list: list, show_id: int):
-    command = """INSERT INTO new_episodes (show_id, number, title, plot, rating) VALUES (?,?,?,?,?)"""
-    cursor.execute("SELECT last_watched FROM shows WHERE id = ?", (show_id,))
-    last_watched = cursor.fetchone()[0]
-
+def set_new_episodes(episode_list: list, show_id: int):
+    command = "INSERT INTO new_episodes (show_id, number, title, plot, rating) VALUES (?,?,?,?,?)"
+    cursor.execute("SELECT name, last_watched, latest_episode FROM shows WHERE id = ?", (show_id,))
+    name, last_watched, latest_episode = cursor.fetchone()
     for episode in episode_list:
-        if episode["nr"] > last_watched:
+        if episode["nr"] > last_watched and episode["nr"] > latest_episode:
             cursor.execute(command, (show_id, episode["nr"], episode["title"], episode["plot"], episode["rating"]))
+            get_video_for_episode(episode["nr"], show_id, name)
     
     conn.commit()
 
@@ -230,9 +246,18 @@ def delete_old_episodes(last_watched: int, show_id: int):
     conn.commit()
 
 def print_episode(show_name, ep):
+    video_related = ""
+    if ep["has_trailer"]:
+        video_related = f"has trailer on YouTube at: {ep["video_link"]}"
+    elif ep["has_related_video"]:
+        video_related = f"has related YouTube video at: {ep["video_link"]}"
+    else:
+        video_related = "has no trailers or related videos on YouTube"
+
     print(
         f"[{show_name}] Ep {ep['number']}: {ep['title']} "
-        f"(show status = {ep['status']}, rating = {ep['rating']})"
+        f"(show status = {ep['status']}, rating = {ep['rating']}, "
+        f"{video_related})"
     )
 
 def print_show(show):
@@ -241,6 +266,69 @@ def print_show(show):
         f"last episode watched: {show[5]}, your rating: {show[6]}, "
         f"notifications: {'ON' if show[8] == True else 'OFF'}"
     )
+
+def get_api_key() -> bool:
+    env_key = os.getenv("YOUTUBE_API_KEY")
+    if env_key:
+        return env_key
+
+    raise typer.Exit("YOUTUBE_API_KEY not found in environment.")
+
+def get_youtube_videos(query, nr_of_videos) -> list:
+    youtube = build(
+        "youtube",
+        "v3",
+        developerKey=get_api_key(),
+    )
+
+    request = youtube.search().list(
+        part = "snippet",
+        maxResults = nr_of_videos,
+        q = query,
+        type = "video",
+        videoDuration = "short"
+    )
+    response = request.execute()
+
+    return response.get("items", [])
+
+def get_video_for_episode(episode_nr, show_id, show_name: str):
+    
+    query = f"{show_name} Episode {episode_nr} Trailer"
+    results = get_youtube_videos(query, 5)
+
+    if not results:
+        return
+
+    set_clause = ""
+    for video in results:
+        video_title: str = video["snippet"]["title"]
+        title_words = video_title.lower().split()
+
+        if {show_name.lower(), "episode", str(episode_nr)}.issubset(title_words):
+            video_id = video["id"]["videoId"]
+            video_link = f"https://www.youtube.com/watch?v={video_id}"
+            if "trailer" in title_words or "sneak" in title_words and "peek" in title_words:
+                set_clause = f"has_trailer = '1', video_link = '{video_link}', video_title = '{video_title}'"
+                break
+            else:
+                set_clause = f"has_related_video = '1', video_link = '{video_link}', video_title = '{video_title}'"
+                break
+
+    if set_clause:
+        command = f"UPDATE new_episodes SET {set_clause} WHERE number = {episode_nr} AND show_id = {show_id}"
+        cursor.execute(command)
+        conn.commit()
+
+def refresh():
+    command = "SELECT id, title_id FROM shows WHERE notify = 1"
+    cursor.execute(command)
+
+    rows = cursor.fetchall()
+
+    for (show_id, title_id) in rows:
+        episode_list = get_episodes(title_id)
+        set_new_episodes(episode_list, show_id)
 
 #
 @app.command(help = "Add tv shows into your local storage")
@@ -252,7 +340,7 @@ def add(
     rating: Annotated[float, Option("--rating", "-r", help = "Rating for the show between 1 and 10.")] = 0, 
     notify: Annotated[bool, Option(" /--notify", " /-n", help = "Flag for if you DON'T want to be notified of new content.")] = True
 ):    
-    command = """INSERT INTO shows (title_id, name, imdb_link, status, latest_episode, last_watched, rating, notify) VALUES (?,?,?,?,?,?,?,?)"""
+    command = "INSERT INTO shows (title_id, name, imdb_link, status, latest_episode, last_watched, rating, notify) VALUES (?,?,?,?,?,?,?,?)"
     
     title_id = get_title_id(imdb_link) 
 
@@ -262,6 +350,11 @@ def add(
     if not is_show(title_id):
         raise typer.Exit("Not a show.")
 
+    cursor.execute(command, (title_id, name, imdb_link, status, 0, last_watched, rating, notify))
+    cursor.execute("SELECT id FROM shows WHERE name = ?", (name,))
+    show_id = cursor.fetchone()[0]
+    conn.commit()
+
     episode_list = get_episodes(title_id)
 
     if last_watched == None:
@@ -270,17 +363,11 @@ def add(
         else:
             last_watched = 0
 
-    try:
-        cursor.execute(command, (title_id, name, imdb_link, status, len(episode_list), last_watched, rating, notify))
-        cursor.execute("SELECT id FROM shows WHERE name = ?", (name,))
-        show_id = cursor.fetchone()[0]
-        conn.commit()
-        if notify and len(episode_list) != last_watched:
-            get_new_episodes(episode_list, show_id)
-        # catalog()
-    except sqlite3.Error as e:
-        conn.rollback()
-        raise typer.Exit(f"Error adding show: {e}")
+    if notify and len(episode_list) != last_watched:
+        set_new_episodes(episode_list, show_id)
+
+    cursor.execute(f"UPDATE shows SET latest_episode = ? WHERE name = ?", (len(episode_list), name))
+    conn.commit()
 
 @app.command(help = "Update information about shows")
 def update(
@@ -311,9 +398,6 @@ def update(
 
     if not updates:
         return
-
-    # command = "UPDATE shows SET " + str.join(", ", list(map(lambda key: key + "='" + updates[key] + "'", updates.keys()))) + " WHERE name='" + name + "'"
-    # set_clause = str.join(", ", (f"{col} = ?" for col in updates.keys()))
 
     cursor.execute("SELECT id, latest_episode FROM shows WHERE name = ?", (name,))
     aux = cursor.fetchone()
@@ -398,9 +482,6 @@ def catalog(
     for show in shows:
         print_show(show)
 
-            
-    
-
 @app.command(help = "Flips the notify flag for a show.")
 def notify(name: Annotated[str, Argument(help = "Name of the show you want to change the notify flag for.")]):
     cursor.execute("SELECT notify FROM shows WHERE name = ?", (name,))
@@ -466,7 +547,9 @@ def list_cmd(
             "plot": row[4],
             "rating": row[5],
             "has_trailer": row[6],
-            "trailer_link": row[7],
+            "has_related_video": row[7],
+            "video_link": row[8],
+            "video_title": row[9],
             "status": show_statuses[row[1]],
         }
 
@@ -482,8 +565,8 @@ def list_cmd(
 
     if not group_by_show and not group_by_status:
         episodes.sort(key=sort_key_fn)
-        show_name = next(s[2] for s in shows if s[0] == ep["show_id"])
         for ep in episodes:
+            show_name = next(s[2] for s in shows if s[0] == ep["show_id"])
             print_episode(show_name, ep)
         return
 
@@ -505,7 +588,6 @@ def list_cmd(
     if group_by_status and not group_by_show:
         episodes_by_status: dict[str, list[dict]] = {}
         for ep in episodes:
-            #pot folosi default dict aici
             episodes_by_status.setdefault(ep["status"], [])
             episodes_by_status[ep["status"]].append(ep)
 
@@ -577,11 +659,11 @@ def seed():
     # add("Bojack", "https://www.imdb.com/title/tt3398228/", "watching", 14, 9)
     # add("DBZ", "https://www.imdb.com/title/tt0121220/", "plan_to_watch", None, 0, 0)
     # add("Invincible", "https://www.imdb.com/title/tt6741278/", "watched")
-    add("Breakings Bad", "https://www.imdb.com/title/tt0903747/", "watching", 44, 8)
-    add("Invincible", "https://www.imdb.com/title/tt6741278/", "watching", 10)
-    add("Goat x Goat", "https://www.imdb.com/title/tt2098220/", "watching", 46, 10)
-    add("Cowboy Bebop", "https://www.imdb.com/title/tt0213338/", "plan_to_watch", 20, 0, 0)
-    add("Pluribus", "https://www.imdb.com/title/tt22202452", "plan_to_watch", 3, 0)
+    # add("Breakings Bad", "https://www.imdb.com/title/tt0903747/", "watching", 44, 8)
+    # add("Invincible", "https://www.imdb.com/title/tt6741278/", "watching", 10)
+    # add("Goat x Goat", "https://www.imdb.com/title/tt2098220/", "watching", 46, 10)
+    # add("Cowboy Bebop", "https://www.imdb.com/title/tt0213338/", "plan_to_watch", 20, 0, 0)
+    add("Pluribus", "https://www.imdb.com/title/tt22202452", "plan_to_watch", 6, 0)
 
 
 @app.command("del", help = "Delete the whole database of shows")
@@ -589,5 +671,10 @@ def dele():
     cursor.execute("DROP TABLE shows")
     cursor.execute("DROP TABLE new_episodes")
     
+@app.command("web", help = "test")
+def cev(name: Annotated[str, Argument(help = "Name of show you want to search")]):
+    print("cev")
+
+refresh()
 app()
 
