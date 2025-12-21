@@ -1,4 +1,3 @@
-BingeWatch*
-bingewatcher.db
-cev.py
-.env
+dist
+pypi_api_token.txt
+src/BingeWatcher/bingewatcher.db

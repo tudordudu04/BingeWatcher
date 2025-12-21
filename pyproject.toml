@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "BingeWatcher"
+version = "0.0.2"
+authors = [
+  { name="Caprian Tudor-George", email="tudordudu04@gmail.com" },
+]
+description = "CLI Tool for adding and managing TV shows locally"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+    "typer>=0.9",
+    "google-api-python-client",
+    "typing-extensions"
+]
+
+[project.urls]
+Homepage = "https://github.com/tudordudu04/BingeWatcher"
+Issues = "https://github.com/tudordudu04/BingeWatcher/issues"
+
+[project.scripts]
+binge = "BingeWatcher.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/BingeWatcher"]

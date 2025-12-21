@@ -12,12 +12,32 @@ from urllib.request import urlopen, Request;
 from datetime import date
 from googleapiclient.discovery import build
 
+__version__ = "0.0.3"
+
+def version_callback(value: bool):
+    if value:
+        print(f"BingeWatch Version: {__version__}")
+        raise typer.Exit()
+
 app = typer.Typer(
     add_completion=False,
     context_settings={
         "help_option_names": ["-h", "--help"]
-    }
+    },
 )
+
+@app.callback()
+def main(
+    version: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--version", "-v", callback=version_callback, is_eager=True, help="Show the version and exit."
+        )
+    ] = None,
+):
+    """
+    BingeWatch CLI tool
+    """
 
 conn = sqlite3.connect("bingewatcher.db")
 conn.execute("PRAGMA foreign_keys = ON")
@@ -217,18 +237,22 @@ def print_show(show):
         f"notifications: {'ON' if show[8] == True else 'OFF'}"
     )
 
-def get_api_key() -> bool:
+def get_api_key():
     env_key = os.getenv("YOUTUBE_API_KEY")
     if env_key:
         return env_key
 
-    raise typer.Exit("YOUTUBE_API_KEY not found in environment.")
+    return ""
 
 def get_youtube_videos(query, nr_of_videos) -> list:
+    developerKey=get_api_key()
+    if not developerKey:
+        return []
+    
     youtube = build(
         "youtube",
         "v3",
-        developerKey=get_api_key(),
+        developerKey
     )
 
     request = youtube.search().list(
@@ -277,6 +301,10 @@ def refresh():
 
     rows = cursor.fetchall()
 
+    api_check = get_api_key()
+    if not api_check:
+        typer.echo("YOUTUBE_API_KEY not set as an environment variable.\nWe can't check for youtube related media for show.")
+
     for (show_id, title_id) in rows:
         episode_list = get_episodes(title_id)
         set_new_episodes(episode_list, show_id)
@@ -316,6 +344,9 @@ def add(
     episode_list = get_episodes(title_id)
 
     if notify and len(episode_list) != last_watched:
+        api_check = get_api_key()
+        if not api_check:
+            typer.echo("YOUTUBE_API_KEY not set as an environment variable.\nWe can't check for youtube related media for show.")
         set_new_episodes(episode_list, show_id)
 
     cursor.execute(f"UPDATE shows SET latest_episode = ? WHERE name = ?", (len(episode_list), name))
@@ -579,40 +610,18 @@ def list_cmd(
 
 @app.command(help = "Seed the database with some shows")
 def seed():
-    # name link status last_watched rating notify
-    # add("Breakings Bad", "https://www.imdb.com/title/tt0903747/", "on_hold", 3, 8)
-    # add("Planet Earth II", "https://www.imdb.com/title/tt5491994/", "dropped", 1, 0, 1)
-    # add("Planet Earth", "https://www.imdb.com/title/tt0795176/", "dropped", 1, 0, 0)
-    # add("Band of Brothers", "https://www.imdb.com/title/tt0185906/", "watched")
-    # add("Chernobyl", "https://www.imdb.com/title/tt7366338/", "plan_to_watch", None, 0, 0)
-    # add("The Wire", "https://www.imdb.com/title/tt0306414/", "watching", 5, 6, 0)
-    # add("Avatar: The Last Airbender", "https://www.imdb.com/title/tt0417299/", "watched", None, 10, 0)
-    # add("Pluribus", "https://www.imdb.com/title/tt22202452", "plan_to_watch", None, 0)
-    # add("The Sopranos", "https://www.imdb.com/title/tt0141842/?ref_=chttvtp_t_8")
-    # add("Blue Planet II", "https://www.imdb.com/title/tt6769208/?ref_=chttvtp_t_9", "dropped", 1, 0, 0)
-    # add("Cosmos: A Spacetime Oddysey", "https://www.imdb.com/title/tt2395695/", "dropped", "4", 2)
-    # add("Cosmos", "https://www.imdb.com/title/tt0081846/", "watching", None, 0, 0)
-    # add("Our Planet", "https://www.imdb.com/title/tt9253866/", "dropped", 4)
-    # add("Game of Thrones", "https://www.imdb.com/title/tt0944947/", "plan_to_watch", None, 0, 0)
-    # add("Bluey", "https://www.imdb.com/title/tt7678620/", "on_hold", 2, 7)
-    # add("The World at War", "https://www.imdb.com/title/tt0071075/", "plan_to_watch", None, 0, 0)
-    # add("FMA", "https://www.imdb.com/title/tt1355642/", "watched", None, 10)
-    # add("Attack on Mid", "https://www.imdb.com/title/tt2560140/", "watched", None, 7)
-    # add("Goat x Goat", "https://www.imdb.com/title/tt2098220/", "watching", 130, 10)
-    # add("Cowboy Bebop", "https://www.imdb.com/title/tt0213338/", "plan_to_watch", None, 0, 0)
-    # add("Mid Piece", "https://www.imdb.com/title/tt0388629/", "on_hold", 1000, 6, 1)
-    # add("Bojack", "https://www.imdb.com/title/tt3398228/", "watching", 14, 9)
-    # add("DBZ", "https://www.imdb.com/title/tt0121220/", "plan_to_watch", None, 0, 0)
-    # add("Invincible", "https://www.imdb.com/title/tt6741278/", "watched")
     add("Breakings Bad", "https://www.imdb.com/title/tt0903747/", "watching", 44, 8)
     add("Invincible", "https://www.imdb.com/title/tt6741278/", "watching", 10)
-    add("Goat x Goat", "https://www.imdb.com/title/tt2098220/", "watching", 46, 10)
+    add("Hunter x Hunter", "https://www.imdb.com/title/tt2098220/", "watching", 46, 10)
     add("Cowboy Bebop", "https://www.imdb.com/title/tt0213338/", "plan_to_watch", 20, 0, 0)
     add("Pluribus", "https://www.imdb.com/title/tt22202452", "plan_to_watch", 6, 0)
 
 
-@app.command("del", help = "Delete the whole database of shows")
+@app.command("delete_whole", help = "Delete the whole database of shows.")
 def dele():
+    delete = typer.confirm(f"Are you sure you want to delete the whole database?")
+    if not delete:
+        raise typer.Exit("Delete canceled.")
     cursor.execute("DROP TABLE shows")
     cursor.execute("DROP TABLE new_episodes")
 

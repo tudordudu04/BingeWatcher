@@ -1,0 +1,1 @@
+BingeWatcher is a command-line tool that stores and tracks favorite TV series in a local SQLite database, monitors new episodes (via IMDB), checks YouTube for related trailers/uploads, and notifies the user based on preferences and scores.
